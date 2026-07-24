@@ -1,9 +1,14 @@
 import { defineConfig } from 'tsdown'
 
 export default defineConfig({
+  entry: ['src/index.ts'],
+  format: ['esm', 'cjs'],
   dts: {
-    tsgo: true,
+    cjsReexport: true,
+  },
+  deps: {
+    neverBundle: ['electron'],
   },
   exports: true,
-  // ...config options
+  sourcemap: true,
 })
