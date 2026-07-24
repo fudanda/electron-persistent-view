@@ -54,6 +54,20 @@ view.show()
 await view.close() // Closes the page; the persistent session remains.
 ```
 
+To restore cookies and page state without showing the view yet:
+
+```ts
+await view.open({
+  parentWindow: BrowserWindow.getFocusedWindow()!,
+  url: 'https://example.com/account',
+  bounds: { x: 0, y: 0, width: 900, height: 700 },
+  visible: false,
+})
+
+// Later, after the host UI is ready:
+view.show({ focus: true })
+```
+
 ## Persistent profile path
 
 ```ts
@@ -143,6 +157,7 @@ open(options: {
   parentWindow: BaseWindow
   url: string
   bounds: Rectangle
+  visible?: boolean
   focus?: boolean
   loadOptions?: LoadURLOptions
 }): Promise<void>
@@ -156,8 +171,12 @@ clearStorageData(options?: ClearStorageDataOptions): Promise<void>
 ```
 
 - `open()` creates or reuses the current view, attaches it, navigates, and
-  displays it after loading.
-- `hide()` cancels a pending show and keeps the page alive.
+  displays it after loading. `visible` defaults to `true`.
+- `open({ visible: false })` completes navigation and Session restoration while
+  leaving the view hidden with state `hidden`.
+- `hide()` during loading records a hidden intent, so load completion cannot
+  reveal the view. `show()` during loading waits for completion before showing
+  or focusing it.
 - `close()` detaches and closes WebContents without deleting persistent
   Session data. It is idempotent, and a later `open()` creates a fresh view.
 - Boolean methods return `false` when there is no live view or the supplied
@@ -174,6 +193,15 @@ readonly state: 'idle' | 'opening' | 'visible' | 'hidden' | 'closing'
 The controller supports one parent window at a time. `close()` is idempotent,
 and the same controller can be opened again.
 
+## UI composition
+
+Electron `WebContentsView` content is composited above the renderer DOM. CSS
+`z-index`, fixed positioning, and renderer overlays cannot cover it. The host
+must call `hide()` before showing welcome screens, settings, permission flows,
+menus, dialogs, or other DOM overlays, then call `show()` after those surfaces
+close. Keeping the view hidden preserves its WebContents, Session, scroll
+position, and form state.
+
 ## Development
 
 ```bash
@@ -182,5 +210,7 @@ npm run typecheck
 npm test
 npm run build
 npm run test:electron
+npx publint
+npx @arethetypeswrong/cli --pack .
 npm pack --dry-run
 ```

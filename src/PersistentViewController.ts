@@ -31,13 +31,31 @@ const normalizeBounds = (bounds: Rectangle): Rectangle | null => {
   }
 }
 
+const combineErrors = (
+  errors: unknown[],
+  message: string,
+): unknown | null => {
+  if (errors.length === 0) return null
+  if (errors.length === 1) return errors[0]
+  return new AggregateError(errors, message)
+}
+
+interface ManagedView {
+  view: WebContentsView
+  parentWindow: BaseWindow
+  configureCleanup: PersistentViewCleanup | null
+  handleParentClosed: () => void
+  handleWebContentsDestroyed: () => void
+}
+
 export class PersistentViewController {
   readonly session: Session
 
-  private view: WebContentsView | null = null
-  private parentWindow: BaseWindow | null = null
-  private configureCleanup: PersistentViewCleanup | null = null
+  private managedView: ManagedView | null = null
   private operationId = 0
+  private pendingLoadOperationId: number | null = null
+  private desiredVisible = false
+  private focusWhenVisible = false
   private currentState: PersistentViewState = 'idle'
 
   constructor(
@@ -47,8 +65,8 @@ export class PersistentViewController {
   }
 
   get webContents(): WebContents | null {
-    if (!this.view || this.view.webContents.isDestroyed()) return null
-    return this.view.webContents
+    const webContents = this.managedView?.view.webContents
+    return webContents && !webContents.isDestroyed() ? webContents : null
   }
 
   get state(): PersistentViewState {
@@ -56,7 +74,6 @@ export class PersistentViewController {
   }
 
   async open(options: OpenPersistentViewOptions): Promise<void> {
-    const operationId = ++this.operationId
     const bounds = normalizeBounds(options.bounds)
     if (!bounds) {
       throw new Error('Persistent view bounds are invalid')
@@ -68,61 +85,100 @@ export class PersistentViewController {
       throw new Error('Persistent view parent window is unavailable')
     }
 
+    const managedView = this.ensureView(options.parentWindow)
+    const operationId = ++this.operationId
+    const shouldShow = options.visible !== false
+    this.pendingLoadOperationId = operationId
+    this.desiredVisible = shouldShow
+    this.focusWhenVisible = shouldShow && options.focus !== false
+
     try {
-      const view = this.ensureView(options.parentWindow)
+      const { view } = managedView
       view.setBounds(bounds)
       view.setVisible(false)
       this.currentState = 'opening'
 
       await view.webContents.loadURL(options.url, options.loadOptions)
       if (operationId !== this.operationId) return
+      if (this.managedView !== managedView) return
       if (view.webContents.isDestroyed()) return
+
+      this.pendingLoadOperationId = null
+      if (!this.desiredVisible) {
+        view.setVisible(false)
+        this.currentState = 'hidden'
+        return
+      }
 
       view.setVisible(true)
       this.currentState = 'visible'
-      if (options.focus !== false) {
+      if (this.focusWhenVisible) {
         view.webContents.focus()
       }
+      this.focusWhenVisible = false
     } catch (error) {
       if (operationId !== this.operationId) return
-      await this.close()
+      try {
+        await this.close()
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [error, cleanupError],
+          'Persistent view failed to load and close cleanly',
+        )
+      }
       throw error
+    } finally {
+      if (this.pendingLoadOperationId === operationId) {
+        this.pendingLoadOperationId = null
+      }
     }
   }
 
   setBounds(bounds: Rectangle): boolean {
     const normalized = normalizeBounds(bounds)
-    if (!normalized || !this.view || this.view.webContents.isDestroyed()) {
+    const view = this.managedView?.view
+    if (!normalized || !view || view.webContents.isDestroyed()) {
       return false
     }
-    this.view.setBounds(normalized)
+    view.setBounds(normalized)
     return true
   }
 
   show(options: { focus?: boolean } = {}): boolean {
-    const view = this.view
+    const managedView = this.managedView
+    const view = managedView?.view
     if (
       !view
       || view.webContents.isDestroyed()
-      || !this.parentWindow
-      || this.parentWindow.isDestroyed()
+      || !managedView
+      || managedView.parentWindow.isDestroyed()
     ) {
       return false
     }
 
+    this.desiredVisible = true
+    this.focusWhenVisible = options.focus === true
+    if (this.pendingLoadOperationId !== null) {
+      view.setVisible(false)
+      this.currentState = 'opening'
+      return true
+    }
+
     view.setVisible(true)
     this.currentState = 'visible'
-    if (options.focus === true) {
+    if (this.focusWhenVisible) {
       view.webContents.focus()
     }
+    this.focusWhenVisible = false
     return true
   }
 
   hide(): boolean {
-    const view = this.view
+    const view = this.managedView?.view
     if (!view || view.webContents.isDestroyed()) return false
 
-    this.operationId += 1
+    this.desiredVisible = false
+    this.focusWhenVisible = false
     view.setVisible(false)
     this.currentState = 'hidden'
     return true
@@ -143,51 +199,42 @@ export class PersistentViewController {
 
   async close(): Promise<void> {
     this.operationId += 1
-    const view = this.view
-    const parentWindow = this.parentWindow
-    this.view = null
-    this.parentWindow = null
+    this.pendingLoadOperationId = null
+    this.desiredVisible = false
+    this.focusWhenVisible = false
+    const managedView = this.managedView
 
-    if (!view) {
+    if (!managedView) {
       this.currentState = 'idle'
       return
     }
 
     this.currentState = 'closing'
-    parentWindow?.removeListener('closed', this.handleParentClosed)
-
-    try {
-      this.configureCleanup?.()
-    } finally {
-      this.configureCleanup = null
-    }
-
-    if (parentWindow && !parentWindow.isDestroyed()) {
-      try {
-        parentWindow.contentView.removeChildView(view)
-      } catch {
-        // The parent can detach its children while it is closing.
-      }
-    }
-
-    if (!view.webContents.isDestroyed()) {
-      view.webContents.close({ waitForBeforeUnload: false })
-    }
+    const cleanupError = this.disposeManagedView(managedView, true)
     this.currentState = 'idle'
+
+    if (cleanupError) {
+      throw cleanupError
+    }
   }
 
-  private readonly handleParentClosed = (): void => {
-    void this.close()
-  }
-
-  private ensureView(parentWindow: BaseWindow): WebContentsView {
-    if (this.view && !this.view.webContents.isDestroyed()) {
-      if (this.parentWindow !== parentWindow) {
+  private ensureView(parentWindow: BaseWindow): ManagedView {
+    const existing = this.managedView
+    if (existing && !existing.view.webContents.isDestroyed()) {
+      if (existing.parentWindow !== parentWindow) {
         throw new Error(
           'Persistent view cannot be attached to multiple windows',
         )
       }
-      return this.view
+      return existing
+    }
+
+    if (existing) {
+      const cleanupError = this.disposeManagedView(existing, false)
+      this.currentState = 'idle'
+      if (cleanupError) {
+        throw cleanupError
+      }
     }
 
     const view = new WebContentsView({
@@ -200,21 +247,174 @@ export class PersistentViewController {
         webSecurity: true,
       },
     })
-    view.setBackgroundColor(this.options.backgroundColor ?? '#ffffff')
-    view.setBorderRadius(this.options.borderRadius ?? 0)
-    view.setVisible(false)
-    view.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+    let configureCleanup: PersistentViewCleanup | null = null
+    let attached = false
+    let parentListenerAttached = false
+    let destroyedListenerAttached = false
+    let managedView: ManagedView | null = null
 
-    const cleanup = this.options.configureWebContents?.({
-      session: this.session,
-      webContents: view.webContents,
-    })
+    try {
+      view.setBackgroundColor(this.options.backgroundColor ?? '#ffffff')
+      view.setBorderRadius(this.options.borderRadius ?? 0)
+      view.setVisible(false)
+      view.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
 
-    this.view = view
-    this.parentWindow = parentWindow
-    this.configureCleanup = cleanup ?? null
-    parentWindow.contentView.addChildView(view)
-    parentWindow.once('closed', this.handleParentClosed)
-    return view
+      configureCleanup = this.options.configureWebContents?.({
+        session: this.session,
+        webContents: view.webContents,
+      }) ?? null
+
+      const handleParentClosed = (): void => {
+        if (this.managedView !== managedView) return
+        void this.close().catch(error => {
+          console.error(
+            '[electron-persistent-view] failed to close after parent window closed',
+            error,
+          )
+        })
+      }
+      const handleWebContentsDestroyed = (): void => {
+        if (!managedView || this.managedView !== managedView) return
+        this.operationId += 1
+        this.pendingLoadOperationId = null
+        this.desiredVisible = false
+        this.focusWhenVisible = false
+        this.currentState = 'closing'
+        const cleanupError = this.disposeManagedView(managedView, false)
+        this.currentState = 'idle'
+        if (cleanupError) {
+          console.error(
+            '[electron-persistent-view] cleanup failed after webContents was destroyed',
+            cleanupError,
+          )
+        }
+      }
+
+      managedView = {
+        view,
+        parentWindow,
+        configureCleanup,
+        handleParentClosed,
+        handleWebContentsDestroyed,
+      }
+
+      view.webContents.once('destroyed', handleWebContentsDestroyed)
+      destroyedListenerAttached = true
+      parentWindow.contentView.addChildView(view)
+      attached = true
+      parentWindow.once('closed', handleParentClosed)
+      parentListenerAttached = true
+      this.managedView = managedView
+      return managedView
+    } catch (error) {
+      const rollbackErrors: unknown[] = [error]
+      if (parentListenerAttached && managedView) {
+        try {
+          parentWindow.removeListener('closed', managedView.handleParentClosed)
+        } catch (caughtError) {
+          rollbackErrors.push(caughtError)
+        }
+      }
+      if (
+        destroyedListenerAttached
+        && managedView
+        && !view.webContents.isDestroyed()
+      ) {
+        try {
+          view.webContents.removeListener(
+            'destroyed',
+            managedView.handleWebContentsDestroyed,
+          )
+        } catch (caughtError) {
+          rollbackErrors.push(caughtError)
+        }
+      }
+
+      try {
+        configureCleanup?.()
+      } catch (caughtError) {
+        rollbackErrors.push(caughtError)
+      }
+
+      if (attached && !parentWindow.isDestroyed()) {
+        try {
+          parentWindow.contentView.removeChildView(view)
+        } catch (caughtError) {
+          rollbackErrors.push(caughtError)
+        }
+      }
+      if (!view.webContents.isDestroyed()) {
+        try {
+          view.webContents.close({ waitForBeforeUnload: false })
+        } catch (caughtError) {
+          rollbackErrors.push(caughtError)
+        }
+      }
+
+      throw combineErrors(
+        rollbackErrors,
+        'Persistent view setup and rollback failed',
+      )
+    }
+  }
+
+  private disposeManagedView(
+    managedView: ManagedView,
+    closeWebContents: boolean,
+  ): unknown | null {
+    const cleanupErrors: unknown[] = []
+    if (this.managedView === managedView) {
+      this.managedView = null
+    }
+
+    const {
+      view,
+      parentWindow,
+      configureCleanup,
+      handleParentClosed,
+      handleWebContentsDestroyed,
+    } = managedView
+
+    try {
+      parentWindow.removeListener('closed', handleParentClosed)
+    } catch (error) {
+      cleanupErrors.push(error)
+    }
+    if (!view.webContents.isDestroyed()) {
+      try {
+        view.webContents.removeListener(
+          'destroyed',
+          handleWebContentsDestroyed,
+        )
+      } catch (error) {
+        cleanupErrors.push(error)
+      }
+    }
+
+    try {
+      configureCleanup?.()
+    } catch (error) {
+      cleanupErrors.push(error)
+    }
+
+    if (!parentWindow.isDestroyed()) {
+      try {
+        parentWindow.contentView.removeChildView(view)
+      } catch (error) {
+        cleanupErrors.push(error)
+      }
+    }
+
+    if (closeWebContents && !view.webContents.isDestroyed()) {
+      try {
+        view.webContents.close({ waitForBeforeUnload: false })
+      } catch (error) {
+        cleanupErrors.push(error)
+      }
+    }
+    return combineErrors(
+      cleanupErrors,
+      'Persistent view cleanup failed',
+    )
   }
 }

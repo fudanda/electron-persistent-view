@@ -61,6 +61,7 @@ export interface OpenPersistentViewOptions {
   parentWindow: BaseWindow
   url: string
   bounds: Rectangle
+  visible?: boolean
   focus?: boolean
   loadOptions?: LoadURLOptions
 }

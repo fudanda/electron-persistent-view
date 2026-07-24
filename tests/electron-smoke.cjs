@@ -35,7 +35,11 @@ async function run() {
     parentWindow,
     url: pageUrl,
     bounds: { x: 0, y: 0, width: 480, height: 320 },
+    visible: false,
   })
+  assert.equal(controller.state, 'hidden')
+  assert.equal(controller.show({ focus: true }), true)
+  assert.equal(controller.state, 'visible')
   await controller.webContents.executeJavaScript(
     'localStorage.setItem("persistent-view-smoke", "ok")',
   )
@@ -63,10 +67,40 @@ async function run() {
     type: 'path',
     path: path.join(tempRoot, 'profile'),
   })
-  assert.ok(pathSession)
+  const pathController = new PersistentViewController({
+    session: pathSession,
+  })
+  await pathController.open({
+    parentWindow,
+    url: pageUrl,
+    bounds: { x: 0, y: 0, width: 480, height: 320 },
+    visible: false,
+  })
+  assert.equal(pathController.state, 'hidden')
+  await pathController.webContents.executeJavaScript(
+    'localStorage.setItem("persistent-path-smoke", "ok")',
+  )
+  await pathController.close()
+
+  const reopenedPath = new PersistentViewController({
+    session: pathSession,
+  })
+  await reopenedPath.open({
+    parentWindow,
+    url: pageUrl,
+    bounds: { x: 0, y: 0, width: 480, height: 320 },
+  })
+  assert.equal(
+    await reopenedPath.webContents.executeJavaScript(
+      'localStorage.getItem("persistent-path-smoke")',
+    ),
+    'ok',
+  )
+  await reopenedPath.close()
 
   parentWindow.destroy()
   await partitionSession.clearStorageData()
+  await pathSession.clearStorageData()
   fs.rmSync(tempRoot, { recursive: true, force: true })
 }
 
