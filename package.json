@@ -1,7 +1,7 @@
 {
   "name": "@fudanda/electron-persistent-view",
   "type": "module",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "A secure persistent WebContentsView controller for Electron.",
   "author": "fudanda <314553951@qq.com>",
   "license": "MIT",
@@ -47,15 +47,19 @@
     "test:electron": "npm run build && electron tests/electron-smoke.cjs",
     "typecheck": "tsc --noEmit",
     "check": "npm run typecheck && npm test && npm run build",
+    "lint:package": "publint && attw --pack .",
+    "release:check": "npm run check && npm run test:electron && npm run lint:package",
     "prepack": "npm run build",
-    "prepublishOnly": "npm run typecheck && npm test"
+    "prepublishOnly": "npm run check && npm run test:electron"
   },
   "peerDependencies": {
     "electron": ">=40"
   },
   "devDependencies": {
+    "@arethetypeswrong/cli": "^0.18.5",
     "@types/node": "^26.1.1",
-    "electron": "40.2.1",
+    "electron": "40.10.6",
+    "publint": "^0.3.22",
     "tsdown": "^0.22.5",
     "typescript": "^7.0.2",
     "vitest": "^4.1.10"

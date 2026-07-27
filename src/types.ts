@@ -30,9 +30,15 @@ type EnforcedSecureWebPreferences = {
   session?: never
   partition?: never
   nodeIntegration?: false
+  nodeIntegrationInWorker?: false
+  nodeIntegrationInSubFrames?: false
   contextIsolation?: true
   sandbox?: true
   webSecurity?: true
+  allowRunningInsecureContent?: false
+  webviewTag?: false
+  experimentalFeatures?: false
+  enableBlinkFeatures?: never
 }
 
 export type PersistentViewWebPreferences = Omit<
@@ -64,7 +70,14 @@ export interface OpenPersistentViewOptions {
   visible?: boolean
   focus?: boolean
   loadOptions?: LoadURLOptions
+  signal?: AbortSignal
+  timeoutMs?: number
 }
+
+export type OpenPersistentViewResult =
+  | { status: 'opened' }
+  | { status: 'superseded' }
+  | { status: 'closed' }
 
 export type PersistentViewState =
   | 'idle'
@@ -72,6 +85,10 @@ export type PersistentViewState =
   | 'visible'
   | 'hidden'
   | 'closing'
+
+export type PersistentViewStateListener = (
+  state: PersistentViewState,
+) => void
 
 export type {
   BaseWindow,

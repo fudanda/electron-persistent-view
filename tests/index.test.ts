@@ -1,3 +1,5 @@
+import path from 'node:path'
+
 import { beforeEach, describe, expect, test, vi } from 'vitest'
 
 const electronMock = vi.hoisted(() => {
@@ -94,9 +96,11 @@ const electronMock = vi.hoisted(() => {
 
   const partitionSession = {
     clearStorageData: vi.fn(async () => undefined),
+    flushStorageData: vi.fn(),
   }
   const pathSession = {
     clearStorageData: vi.fn(async () => undefined),
+    flushStorageData: vi.fn(),
   }
 
   return {
@@ -200,7 +204,7 @@ describe('resolvePersistentSession', () => {
 
     expect(resolvePersistentSession({
       type: 'path',
-      path: 'D:\\profiles\\account',
+      path: path.resolve('profiles', 'account'),
     })).toBe(electronMock.pathSession)
     expect(electronMock.fromPath).toHaveBeenCalled()
   })
@@ -219,6 +223,7 @@ describe('PersistentViewController', () => {
     electronMock.appReady = true
     electronMock.MockWebContentsView.instances.length = 0
     electronMock.partitionSession.clearStorageData.mockClear()
+    electronMock.partitionSession.flushStorageData.mockClear()
     electronMock.runtime.loadURLHandler = () => null
   })
 
@@ -229,7 +234,13 @@ describe('PersistentViewController', () => {
       webPreferences: {
         devTools: true,
         nodeIntegration: true,
+        nodeIntegrationInWorker: true,
+        nodeIntegrationInSubFrames: true,
         webSecurity: false,
+        allowRunningInsecureContent: true,
+        webviewTag: true,
+        experimentalFeatures: true,
+        enableBlinkFeatures: 'UnsafeFeature',
       } as never,
       backgroundColor: '#123456',
       borderRadius: 6,
@@ -237,11 +248,11 @@ describe('PersistentViewController', () => {
     })
     const parent = electronMock.createParentWindow()
 
-    await controller.open({
+    await expect(controller.open({
       parentWindow: parent as never,
       url: 'https://example.test/',
       bounds: { x: 1.4, y: 2.6, width: 600.2, height: 400.8 },
-    })
+    })).resolves.toEqual({ status: 'opened' })
 
     const view = electronMock.MockWebContentsView.instances[0]
     expect(parent.contentView.addChildView).toHaveBeenCalledWith(view)
@@ -253,10 +264,18 @@ describe('PersistentViewController', () => {
       session: electronMock.partitionSession,
       devTools: true,
       nodeIntegration: false,
+      nodeIntegrationInWorker: false,
+      nodeIntegrationInSubFrames: false,
       contextIsolation: true,
       sandbox: true,
       webSecurity: true,
+      allowRunningInsecureContent: false,
+      webviewTag: false,
+      experimentalFeatures: false,
     })
+    expect(view.options.webPreferences).not.toHaveProperty(
+      'enableBlinkFeatures',
+    )
     expect(configureWebContents).toHaveBeenCalledOnce()
     expect(controller.state).toBe('visible')
   })
@@ -357,12 +376,12 @@ describe('PersistentViewController', () => {
       visible: false,
     })
 
+    await expect(firstOpen).resolves.toEqual({ status: 'superseded' })
     secondLoad.resolve(undefined)
-    await secondOpen
+    await expect(secondOpen).resolves.toEqual({ status: 'opened' })
     expect(controller.state).toBe('hidden')
 
     firstLoad.resolve(undefined)
-    await firstOpen
     expect(controller.state).toBe('hidden')
     expect(electronMock.MockWebContentsView.instances[0].visible).toBe(false)
   })
@@ -387,6 +406,7 @@ describe('PersistentViewController', () => {
     })
     const firstView = electronMock.MockWebContentsView.instances[0]
     await controller.close()
+    await expect(firstOpen).resolves.toEqual({ status: 'closed' })
     await controller.open({
       ...sharedOptions,
       url: 'https://example.test/second',
@@ -394,7 +414,6 @@ describe('PersistentViewController', () => {
     const secondView = electronMock.MockWebContentsView.instances[1]
 
     firstLoad.resolve(undefined)
-    await firstOpen
     expect(firstView.webContents.close).toHaveBeenCalledOnce()
     expect(secondView.visible).toBe(true)
     expect(controller.webContents).toBe(secondView.webContents)
@@ -421,7 +440,7 @@ describe('PersistentViewController', () => {
     expect(view.webContents.focus).toHaveBeenCalledTimes(2)
   })
 
-  test('validates bounds and delegates reload and storage clearing', async () => {
+  test('validates bounds and delegates reload and storage persistence', async () => {
     const controller = new PersistentViewController({
       session: electronMock.partitionSession as never,
     })
@@ -440,9 +459,160 @@ describe('PersistentViewController', () => {
     })).toBe(false)
     expect(controller.reload()).toBe(true)
     await controller.clearStorageData({ origin: 'https://example.test' })
+    controller.flushStorageData()
     expect(electronMock.partitionSession.clearStorageData).toHaveBeenCalledWith({
       origin: 'https://example.test',
     })
+    expect(
+      electronMock.partitionSession.flushStorageData,
+    ).toHaveBeenCalledOnce()
+  })
+
+  test('aborts a pending open and closes the failed view', async () => {
+    const load = createDeferred()
+    electronMock.runtime.loadURLHandler = () => load.promise
+    const controller = new PersistentViewController({
+      session: electronMock.partitionSession as never,
+    })
+    const parent = electronMock.createParentWindow()
+    const abortController = new AbortController()
+
+    const opening = controller.open({
+      parentWindow: parent as never,
+      url: 'https://example.test/abort',
+      bounds: { x: 0, y: 0, width: 400, height: 300 },
+      signal: abortController.signal,
+    })
+    abortController.abort('cancelled by host')
+
+    await expect(opening).rejects.toMatchObject({ name: 'AbortError' })
+    expect(
+      electronMock.MockWebContentsView.instances[0].webContents.close,
+    ).toHaveBeenCalledOnce()
+    expect(controller.webContents).toBeNull()
+    expect(controller.state).toBe('idle')
+    load.resolve(undefined)
+  })
+
+  test('preserves abort result when a replacement opens immediately', async () => {
+    const abortedLoad = createDeferred()
+    electronMock.runtime.loadURLHandler = (_webContents, url) => (
+      url.endsWith('/aborted') ? abortedLoad.promise : null
+    )
+    const controller = new PersistentViewController({
+      session: electronMock.partitionSession as never,
+    })
+    const parent = electronMock.createParentWindow()
+    const abortController = new AbortController()
+    const sharedOptions = {
+      parentWindow: parent as never,
+      bounds: { x: 0, y: 0, width: 400, height: 300 },
+    }
+
+    const abortedOpen = controller.open({
+      ...sharedOptions,
+      url: 'https://example.test/aborted',
+      signal: abortController.signal,
+    })
+    abortController.abort()
+    const replacementOpen = controller.open({
+      ...sharedOptions,
+      url: 'https://example.test/replacement',
+    })
+
+    await expect(abortedOpen).rejects.toMatchObject({ name: 'AbortError' })
+    await expect(replacementOpen).resolves.toEqual({ status: 'opened' })
+    expect(controller.state).toBe('visible')
+    abortedLoad.resolve(undefined)
+  })
+
+  test('times out a pending open and can open again', async () => {
+    const load = createDeferred()
+    electronMock.runtime.loadURLHandler = () => load.promise
+    const controller = new PersistentViewController({
+      session: electronMock.partitionSession as never,
+    })
+    const parent = electronMock.createParentWindow()
+
+    await expect(controller.open({
+      parentWindow: parent as never,
+      url: 'https://example.test/timeout',
+      bounds: { x: 0, y: 0, width: 400, height: 300 },
+      timeoutMs: 5,
+    })).rejects.toMatchObject({ name: 'TimeoutError' })
+    expect(controller.state).toBe('idle')
+
+    electronMock.runtime.loadURLHandler = () => null
+    await expect(controller.open({
+      parentWindow: parent as never,
+      url: 'https://example.test/recovered',
+      bounds: { x: 0, y: 0, width: 400, height: 300 },
+    })).resolves.toEqual({ status: 'opened' })
+    load.resolve(undefined)
+  })
+
+  test('rejects invalid timeout and a signal already aborted', async () => {
+    const controller = new PersistentViewController({
+      session: electronMock.partitionSession as never,
+    })
+    const parent = electronMock.createParentWindow()
+    const abortController = new AbortController()
+    abortController.abort()
+    const baseOptions = {
+      parentWindow: parent as never,
+      url: 'https://example.test/',
+      bounds: { x: 0, y: 0, width: 400, height: 300 },
+    }
+
+    await expect(controller.open({
+      ...baseOptions,
+      timeoutMs: 0,
+    })).rejects.toThrow(/greater than zero/)
+    await expect(controller.open({
+      ...baseOptions,
+      signal: abortController.signal,
+    })).rejects.toMatchObject({ name: 'AbortError' })
+    expect(electronMock.MockWebContentsView.instances).toHaveLength(0)
+  })
+
+  test('subscribes to state changes without trusting listener code', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const states: string[] = []
+    const controller = new PersistentViewController({
+      session: electronMock.partitionSession as never,
+    })
+    const parent = electronMock.createParentWindow()
+    const unsubscribe = controller.subscribe(state => {
+      states.push(state)
+    })
+    controller.subscribe(() => {
+      throw new Error('listener failed')
+    })
+
+    await controller.open({
+      parentWindow: parent as never,
+      url: 'https://example.test/',
+      bounds: { x: 0, y: 0, width: 400, height: 300 },
+      visible: false,
+    })
+    controller.show()
+    await controller.close()
+    unsubscribe()
+    await controller.open({
+      parentWindow: parent as never,
+      url: 'https://example.test/reopened',
+      bounds: { x: 0, y: 0, width: 400, height: 300 },
+    })
+
+    expect(states).toEqual([
+      'opening',
+      'hidden',
+      'visible',
+      'closing',
+      'idle',
+    ])
+    expect(consoleError).toHaveBeenCalled()
+    consoleError.mockRestore()
   })
 
   test('closes idempotently and can create a fresh view later', async () => {
@@ -469,6 +639,30 @@ describe('PersistentViewController', () => {
 
     await controller.open(openOptions)
     expect(electronMock.MockWebContentsView.instances).toHaveLength(2)
+  })
+
+  test('allows a new open while an idempotent close is settling', async () => {
+    const controller = new PersistentViewController({
+      session: electronMock.partitionSession as never,
+    })
+    const parent = electronMock.createParentWindow()
+    const openOptions = {
+      parentWindow: parent as never,
+      url: 'https://example.test/',
+      bounds: { x: 0, y: 0, width: 400, height: 300 },
+    }
+    await controller.open(openOptions)
+
+    const closing = controller.close()
+    const reopening = controller.open({
+      ...openOptions,
+      url: 'https://example.test/reopened',
+    })
+
+    await expect(closing).resolves.toBeUndefined()
+    await expect(reopening).resolves.toEqual({ status: 'opened' })
+    expect(electronMock.MockWebContentsView.instances).toHaveLength(2)
+    expect(controller.state).toBe('visible')
   })
 
   test('rolls back a view when configuration fails', async () => {
@@ -589,5 +783,26 @@ describe('PersistentViewController', () => {
       expect(view.webContents.close).toHaveBeenCalledOnce()
     })
     expect(controller.state).toBe('idle')
+  })
+
+  test('settles a pending open when the parent window closes', async () => {
+    const load = createDeferred()
+    electronMock.runtime.loadURLHandler = () => load.promise
+    const controller = new PersistentViewController({
+      session: electronMock.partitionSession as never,
+    })
+    const parent = electronMock.createParentWindow()
+    const opening = controller.open({
+      parentWindow: parent as never,
+      url: 'https://example.test/slow',
+      bounds: { x: 0, y: 0, width: 400, height: 300 },
+    })
+
+    parent.destroyed = true
+    parent.emit('closed')
+
+    await expect(opening).resolves.toEqual({ status: 'closed' })
+    expect(controller.state).toBe('idle')
+    load.resolve(undefined)
   })
 })

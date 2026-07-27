@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.3.0 - 2026-07-27
+
+### Added
+
+- Added deterministic `open()` results for completed, superseded, and closed
+  navigation attempts.
+- Added `AbortSignal` cancellation and positive load timeouts.
+- Added `flushStorageData()` and lifecycle state subscriptions.
+- Added Windows, Linux, and macOS CI with real Electron smoke coverage for CJS,
+  ESM, partition Sessions, path Sessions, and persisted localStorage.
+
+### Security
+
+- Enforced worker and subframe Node.js isolation, disabled insecure mixed
+  content, WebView tags, experimental features, and host-provided Blink feature
+  flags.
+- Updated the Electron development validation baseline to `40.10.6`.
+
+### Changed
+
+- Added local `publint` and AreTheTypesWrong CI and release gates.
+- Made superseded and closed loads settle promptly without allowing stale
+  `loadURL()` rejections to become unhandled.
+
 ## 0.2.0 - 2026-07-24
 
 ### Added

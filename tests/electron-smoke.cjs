@@ -9,10 +9,14 @@ const { pathToFileURL } = require('node:url')
 const { app, BrowserWindow } = require('electron')
 
 async function run() {
+  const cjs = require('../dist/index.cjs')
+  const esm = await import('../dist/index.mjs')
   const {
     PersistentViewController,
     resolvePersistentSession,
-  } = require('../dist/index.cjs')
+  } = cjs
+  assert.equal(typeof esm.PersistentViewController, 'function')
+  assert.equal(typeof esm.resolvePersistentSession, 'function')
 
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'electron-persistent-view-'))
   const htmlPath = path.join(tempRoot, 'index.html')
@@ -31,18 +35,19 @@ async function run() {
   const controller = new PersistentViewController({
     session: partitionSession,
   })
-  await controller.open({
+  assert.deepEqual(await controller.open({
     parentWindow,
     url: pageUrl,
     bounds: { x: 0, y: 0, width: 480, height: 320 },
     visible: false,
-  })
+  }), { status: 'opened' })
   assert.equal(controller.state, 'hidden')
   assert.equal(controller.show({ focus: true }), true)
   assert.equal(controller.state, 'visible')
   await controller.webContents.executeJavaScript(
     'localStorage.setItem("persistent-view-smoke", "ok")',
   )
+  controller.flushStorageData()
   assert.equal(controller.hide(), true)
   assert.equal(controller.show(), true)
   await controller.close()
@@ -63,7 +68,7 @@ async function run() {
   )
   await reopened.close()
 
-  const pathSession = resolvePersistentSession({
+  const pathSession = esm.resolvePersistentSession({
     type: 'path',
     path: path.join(tempRoot, 'profile'),
   })
@@ -80,6 +85,7 @@ async function run() {
   await pathController.webContents.executeJavaScript(
     'localStorage.setItem("persistent-path-smoke", "ok")',
   )
+  pathController.flushStorageData()
   await pathController.close()
 
   const reopenedPath = new PersistentViewController({

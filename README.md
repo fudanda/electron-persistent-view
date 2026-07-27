@@ -89,9 +89,15 @@ name.
 Every view enforces:
 
 - `nodeIntegration: false`
+- `nodeIntegrationInWorker: false`
+- `nodeIntegrationInSubFrames: false`
 - `contextIsolation: true`
 - `sandbox: true`
 - `webSecurity: true`
+- `allowRunningInsecureContent: false`
+- `webviewTag: false`
+- `experimentalFeatures: false`
+- no host-supplied `enableBlinkFeatures`
 - denied popup windows unless the host replaces the handler in
   `configureWebContents`
 
@@ -146,9 +152,11 @@ interface PersistentViewControllerOptions {
 ```
 
 `webPreferences` may configure normal Electron preferences, but cannot supply
-another session or weaken `nodeIntegration`, `contextIsolation`, `sandbox`, or
-`webSecurity`. The optional hook runs once for each created WebContents and may
-return an event-listener cleanup function.
+another session or weaken the enforced security preferences. The controller
+rebuilds these values at runtime as well as restricting them in TypeScript, so
+unsafe values passed through a type assertion are discarded. The optional hook
+runs once for each created WebContents and may return an event-listener cleanup
+function.
 
 ### Controller methods
 
@@ -160,7 +168,13 @@ open(options: {
   visible?: boolean
   focus?: boolean
   loadOptions?: LoadURLOptions
-}): Promise<void>
+  signal?: AbortSignal
+  timeoutMs?: number
+}): Promise<
+  | { status: 'opened' }
+  | { status: 'superseded' }
+  | { status: 'closed' }
+>
 
 show(options?: { focus?: boolean }): boolean
 hide(): boolean
@@ -168,12 +182,20 @@ setBounds(bounds: Rectangle): boolean
 reload(): boolean
 close(): Promise<void>
 clearStorageData(options?: ClearStorageDataOptions): Promise<void>
+flushStorageData(): void
+subscribe(listener: (state: PersistentViewState) => void): () => void
 ```
 
 - `open()` creates or reuses the current view, attaches it, navigates, and
   displays it after loading. `visible` defaults to `true`.
 - `open({ visible: false })` completes navigation and Session restoration while
   leaving the view hidden with state `hidden`.
+- A newer `open()` resolves the replaced call with `status: 'superseded'`.
+  `close()`, parent closure, or external WebContents destruction resolves a
+  pending call with `status: 'closed'`.
+- Aborting `signal` rejects with an `AbortError`. A positive `timeoutMs` rejects
+  with a `TimeoutError`. Both failure paths close the failed view and return the
+  controller to `idle`.
 - `hide()` during loading records a hidden intent, so load completion cannot
   reveal the view. `show()` during loading waits for completion before showing
   or focusing it.
@@ -181,6 +203,12 @@ clearStorageData(options?: ClearStorageDataOptions): Promise<void>
   Session data. It is idempotent, and a later `open()` creates a fresh view.
 - Boolean methods return `false` when there is no live view or the supplied
   bounds are invalid.
+- `flushStorageData()` asks Chromium to write in-memory Session data to disk.
+  Use it after critical storage updates or before an intentional application
+  shutdown. It does not close the view.
+- `subscribe()` observes future state changes and returns an idempotent
+  unsubscribe function. Listener failures are logged and cannot interrupt the
+  controller lifecycle.
 
 ### Readonly properties
 
@@ -210,7 +238,8 @@ npm run typecheck
 npm test
 npm run build
 npm run test:electron
-npx publint
-npx @arethetypeswrong/cli --pack .
+npm run lint:package
+npm run release:check
 npm pack --dry-run
+npm publish --dry-run --access public
 ```

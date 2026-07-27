@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+          - macos-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run type, unit, and build checks
+        run: npm run check
+
+      - name: Validate package exports
+        run: npm run lint:package
+
+      - name: Inspect package contents
+        run: npm pack --dry-run
+
+      - name: Run Electron smoke test on Linux
+        if: runner.os == 'Linux'
+        run: xvfb-run -a npm run test:electron
+
+      - name: Run Electron smoke test
+        if: runner.os != 'Linux'
+        run: npm run test:electron
