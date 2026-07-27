@@ -47,7 +47,21 @@ async function run() {
   await controller.webContents.executeJavaScript(
     'localStorage.setItem("persistent-view-smoke", "ok")',
   )
-  controller.flushStorageData()
+  await partitionSession.cookies.set({
+    url: 'https://electron-persistent-view.test/',
+    name: 'persistent-view-smoke',
+    value: 'ok',
+  })
+  await controller.flushPersistentData()
+  assert.equal(
+    (
+      await partitionSession.cookies.get({
+        url: 'https://electron-persistent-view.test/',
+        name: 'persistent-view-smoke',
+      })
+    )[0]?.value,
+    'ok',
+  )
   assert.equal(controller.hide(), true)
   assert.equal(controller.show(), true)
   await controller.close()
@@ -85,7 +99,7 @@ async function run() {
   await pathController.webContents.executeJavaScript(
     'localStorage.setItem("persistent-path-smoke", "ok")',
   )
-  pathController.flushStorageData()
+  await pathController.flushPersistentData()
   await pathController.close()
 
   const reopenedPath = new PersistentViewController({

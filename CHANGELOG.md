@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.4.0 - 2026-07-27
+
+### Added
+
+- Added `flushPersistentData()` to flush DOM storage and the cookie store.
+- Exported `PersistentViewOpenStatus` for status comparisons without duplicated
+  string literals.
+
+### Fixed
+
+- Closed and detached the managed view when bounds, visibility, or focus
+  operations fail during `open()`.
+- Prevented synchronous setup, cleanup, and state callbacks from starting a
+  nested open and corrupting the controller lifecycle.
+- Rechecked operation ownership after state callbacks so a reentrant close or
+  replacement cannot be reported as opened.
+- Rejected persistent partition names containing only whitespace.
+
+### Changed
+
+- The npm publish hook now runs the complete release gate, including `publint`
+  and AreTheTypesWrong.
+- Electron peer support is bounded to the validated `40.x` major.
+- The development compiler baseline uses stable TypeScript `6.0.3` instead of
+  the experimental TypeScript 7 toolchain.
+
 ## 0.3.0 - 2026-07-27
 
 ### Added

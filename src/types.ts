@@ -74,10 +74,16 @@ export interface OpenPersistentViewOptions {
   timeoutMs?: number
 }
 
+export const PersistentViewOpenStatus = {
+  Opened: 'opened',
+  Superseded: 'superseded',
+  Closed: 'closed',
+} as const
+
 export type OpenPersistentViewResult =
-  | { status: 'opened' }
-  | { status: 'superseded' }
-  | { status: 'closed' }
+  | { status: typeof PersistentViewOpenStatus.Opened }
+  | { status: typeof PersistentViewOpenStatus.Superseded }
+  | { status: typeof PersistentViewOpenStatus.Closed }
 
 export type PersistentViewState =
   | 'idle'

@@ -1,5 +1,6 @@
 export { PersistentViewController } from './PersistentViewController'
 export { resolvePersistentSession } from './session'
+export { PersistentViewOpenStatus } from './types'
 export type {
   OpenPersistentViewOptions,
   OpenPersistentViewResult,

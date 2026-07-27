@@ -17,6 +17,7 @@ import type {
   PersistentViewState,
   PersistentViewStateListener,
 } from './types'
+import { PersistentViewOpenStatus } from './types'
 
 const normalizeBounds = (bounds: Rectangle): Rectangle | null => {
   const values = [bounds.x, bounds.y, bounds.width, bounds.height]
@@ -87,6 +88,9 @@ export class PersistentViewController {
   private desiredVisible = false
   private focusWhenVisible = false
   private currentState: PersistentViewState = 'idle'
+  private operationId = 0
+  private isDisposing = false
+  private isNotifyingState = false
   private readonly stateListeners = new Set<PersistentViewStateListener>()
 
   constructor(
@@ -107,6 +111,10 @@ export class PersistentViewController {
   async open(
     options: OpenPersistentViewOptions,
   ): Promise<OpenPersistentViewResult> {
+    if (this.isDisposing || this.isNotifyingState) {
+      return { status: PersistentViewOpenStatus.Closed }
+    }
+
     const bounds = normalizeBounds(options.bounds)
     if (!bounds) {
       throw new Error('Persistent view bounds are invalid')
@@ -128,7 +136,10 @@ export class PersistentViewController {
     }
 
     const managedView = this.ensureView(options.parentWindow)
-    this.cancelPendingOpen({ status: 'superseded' })
+    this.cancelPendingOpen({
+      status: PersistentViewOpenStatus.Superseded,
+    })
+    const operationId = ++this.operationId
 
     const shouldShow = options.visible !== false
     this.desiredVisible = shouldShow
@@ -168,33 +179,38 @@ export class PersistentViewController {
     }
 
     const { view } = managedView
-    view.setBounds(bounds)
-    view.setVisible(false)
-    this.setState('opening')
-
-    let loadPromise: Promise<OpenOutcome>
     try {
-      loadPromise = view.webContents
-        .loadURL(options.url, options.loadOptions)
-        .then(
-          () => ({ kind: 'loaded' }) as const,
-          error => ({ kind: 'load-error', error }) as const,
-        )
-    } catch (error) {
-      loadPromise = Promise.resolve({ kind: 'load-error', error })
-    }
+      view.setBounds(bounds)
+      view.setVisible(false)
+      this.setState('opening')
 
-    try {
+      let loadPromise: Promise<OpenOutcome>
+      try {
+        loadPromise = view.webContents
+          .loadURL(options.url, options.loadOptions)
+          .then(
+            () => ({ kind: 'loaded' }) as const,
+            error => ({ kind: 'load-error', error }) as const,
+          )
+      } catch (error) {
+        loadPromise = Promise.resolve({ kind: 'load-error', error })
+      }
+
       const outcome = await Promise.race([
         loadPromise,
         cancellationPromise,
       ])
 
-      if (this.pendingOpen !== pendingOpen) {
+      if (
+        this.pendingOpen !== pendingOpen
+        || this.operationId !== operationId
+      ) {
         if (outcome.kind === 'cancel-error') {
           throw outcome.error
         }
-        return pendingOpen.cancellationResult ?? { status: 'superseded' }
+        return pendingOpen.cancellationResult ?? {
+          status: PersistentViewOpenStatus.Superseded,
+        }
       }
       this.pendingOpen = null
       pendingOpen.cleanup()
@@ -203,31 +219,46 @@ export class PersistentViewController {
         return outcome.result
       }
       if (outcome.kind === 'cancel-error') {
-        await this.closeAfterFailedOpen(outcome.error)
+        throw outcome.error
       }
       if (outcome.kind === 'load-error') {
-        await this.closeAfterFailedOpen(outcome.error)
+        throw outcome.error
       }
       if (
         this.managedView !== managedView
         || view.webContents.isDestroyed()
       ) {
-        return { status: 'closed' }
+        return { status: PersistentViewOpenStatus.Closed }
       }
 
       if (!this.desiredVisible) {
         view.setVisible(false)
         this.setState('hidden')
-        return { status: 'opened' }
+        return this.getCompletedOpenResult(operationId, managedView)
       }
 
       view.setVisible(true)
       this.setState('visible')
+      const completedResult = this.getCompletedOpenResult(
+        operationId,
+        managedView,
+      )
+      if (completedResult.status !== PersistentViewOpenStatus.Opened) {
+        return completedResult
+      }
       if (this.focusWhenVisible) {
         view.webContents.focus()
       }
       this.focusWhenVisible = false
-      return { status: 'opened' }
+      return this.getCompletedOpenResult(operationId, managedView)
+    } catch (error) {
+      if (
+        this.operationId === operationId
+        && this.managedView === managedView
+      ) {
+        await this.closeAfterFailedOpen(error)
+      }
+      throw error
     } finally {
       pendingOpen.cleanup()
       if (this.pendingOpen === pendingOpen) {
@@ -244,6 +275,7 @@ export class PersistentViewController {
   }
 
   setBounds(bounds: Rectangle): boolean {
+    if (this.isDisposing) return false
     const normalized = normalizeBounds(bounds)
     const view = this.managedView?.view
     if (!normalized || !view || view.webContents.isDestroyed()) {
@@ -254,6 +286,7 @@ export class PersistentViewController {
   }
 
   show(options: { focus?: boolean } = {}): boolean {
+    if (this.isDisposing) return false
     const managedView = this.managedView
     const view = managedView?.view
     if (
@@ -283,6 +316,7 @@ export class PersistentViewController {
   }
 
   hide(): boolean {
+    if (this.isDisposing) return false
     const view = this.managedView?.view
     if (!view || view.webContents.isDestroyed()) return false
 
@@ -294,6 +328,7 @@ export class PersistentViewController {
   }
 
   reload(): boolean {
+    if (this.isDisposing) return false
     const webContents = this.webContents
     if (!webContents) return false
     webContents.reload()
@@ -310,8 +345,35 @@ export class PersistentViewController {
     this.session.flushStorageData()
   }
 
+  async flushPersistentData(): Promise<void> {
+    const flushErrors: unknown[] = []
+    try {
+      this.session.flushStorageData()
+    } catch (error) {
+      flushErrors.push(error)
+    }
+    try {
+      await this.session.cookies.flushStore()
+    } catch (error) {
+      flushErrors.push(error)
+    }
+
+    const flushError = combineErrors(
+      flushErrors,
+      'Persistent view data failed to flush',
+    )
+    if (flushError) {
+      throw flushError
+    }
+  }
+
   async close(): Promise<void> {
-    this.cancelPendingOpen({ status: 'closed' })
+    if (this.isDisposing) return
+
+    ++this.operationId
+    this.cancelPendingOpen({
+      status: PersistentViewOpenStatus.Closed,
+    })
     this.desiredVisible = false
     this.focusWhenVisible = false
     const managedView = this.managedView
@@ -321,8 +383,14 @@ export class PersistentViewController {
       return
     }
 
-    this.setState('closing')
-    const cleanupError = this.disposeManagedView(managedView, true)
+    this.isDisposing = true
+    let cleanupError: unknown | null = null
+    try {
+      this.setState('closing')
+      cleanupError = this.disposeManagedView(managedView, true)
+    } finally {
+      this.isDisposing = false
+    }
     this.setState('idle')
 
     if (cleanupError) {
@@ -342,7 +410,13 @@ export class PersistentViewController {
     }
 
     if (existing) {
-      const cleanupError = this.disposeManagedView(existing, false)
+      this.isDisposing = true
+      let cleanupError: unknown | null = null
+      try {
+        cleanupError = this.disposeManagedView(existing, false)
+      } finally {
+        this.isDisposing = false
+      }
       this.setState('idle')
       if (cleanupError) {
         throw cleanupError
@@ -385,6 +459,8 @@ export class PersistentViewController {
     let parentListenerAttached = false
     let destroyedListenerAttached = false
     let managedView: ManagedView | null = null
+    const wasDisposing = this.isDisposing
+    this.isDisposing = true
 
     try {
       view.setBackgroundColor(this.options.backgroundColor ?? '#ffffff')
@@ -408,11 +484,20 @@ export class PersistentViewController {
       }
       const handleWebContentsDestroyed = (): void => {
         if (!managedView || this.managedView !== managedView) return
-        this.cancelPendingOpen({ status: 'closed' })
+        ++this.operationId
+        this.cancelPendingOpen({
+          status: PersistentViewOpenStatus.Closed,
+        })
         this.desiredVisible = false
         this.focusWhenVisible = false
-        this.setState('closing')
-        const cleanupError = this.disposeManagedView(managedView, false)
+        this.isDisposing = true
+        let cleanupError: unknown | null = null
+        try {
+          this.setState('closing')
+          cleanupError = this.disposeManagedView(managedView, false)
+        } finally {
+          this.isDisposing = false
+        }
         this.setState('idle')
         if (cleanupError) {
           console.error(
@@ -487,6 +572,8 @@ export class PersistentViewController {
         rollbackErrors,
         'Persistent view setup and rollback failed',
       )
+    } finally {
+      this.isDisposing = wasDisposing
     }
   }
 
@@ -566,24 +653,51 @@ export class PersistentViewController {
     } catch (cleanupError) {
       throw new AggregateError(
         [error, cleanupError],
-        'Persistent view failed to load and close cleanly',
+        'Persistent view failed to open and close cleanly',
       )
     }
     throw error
   }
 
+  private getCompletedOpenResult(
+    operationId: number,
+    managedView: ManagedView,
+  ): OpenPersistentViewResult {
+    if (
+      this.operationId === operationId
+      && this.managedView === managedView
+      && !managedView.view.webContents.isDestroyed()
+    ) {
+      return { status: PersistentViewOpenStatus.Opened }
+    }
+    if (
+      this.managedView === managedView
+      && !managedView.view.webContents.isDestroyed()
+    ) {
+      return { status: PersistentViewOpenStatus.Superseded }
+    }
+    return { status: PersistentViewOpenStatus.Closed }
+  }
+
   private setState(state: PersistentViewState): void {
     if (this.currentState === state) return
     this.currentState = state
-    for (const listener of [...this.stateListeners]) {
-      try {
-        listener(state)
-      } catch (error) {
-        console.error(
-          '[electron-persistent-view] state listener failed',
-          error,
-        )
+    const wasNotifyingState = this.isNotifyingState
+    this.isNotifyingState = true
+    try {
+      for (const listener of [...this.stateListeners]) {
+        try {
+          listener(state)
+        } catch (error) {
+          console.error(
+            '[electron-persistent-view] state listener failed',
+            error,
+          )
+        }
+        if (this.currentState !== state) break
       }
+    } finally {
+      this.isNotifyingState = wasNotifyingState
     }
   }
 }

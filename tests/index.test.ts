@@ -10,8 +10,12 @@ const electronMock = vi.hoisted(() => {
       webContents: MockWebContents,
       url: string,
     ) => Promise<void> | null
+    setBoundsError: Error | null
+    focusError: Error | null
   } = {
     loadURLHandler: () => null,
+    setBoundsError: null,
+    focusError: null,
   }
 
   class MockWebContents {
@@ -26,6 +30,11 @@ const electronMock = vi.hoisted(() => {
       await runtime.loadURLHandler(this, url)
     })
     focus = vi.fn(() => {
+      if (runtime.focusError) {
+        const error = runtime.focusError
+        runtime.focusError = null
+        throw error
+      }
       this.focused = true
     })
     reload = vi.fn(() => {
@@ -81,6 +90,11 @@ const electronMock = vi.hoisted(() => {
     }
 
     setBounds = vi.fn((bounds: Record<string, number>) => {
+      if (runtime.setBoundsError) {
+        const error = runtime.setBoundsError
+        runtime.setBoundsError = null
+        throw error
+      }
       this.bounds = bounds
     })
     setVisible = vi.fn((visible: boolean) => {
@@ -97,10 +111,16 @@ const electronMock = vi.hoisted(() => {
   const partitionSession = {
     clearStorageData: vi.fn(async () => undefined),
     flushStorageData: vi.fn(),
+    cookies: {
+      flushStore: vi.fn(async () => undefined),
+    },
   }
   const pathSession = {
     clearStorageData: vi.fn(async () => undefined),
     flushStorageData: vi.fn(),
+    cookies: {
+      flushStore: vi.fn(async () => undefined),
+    },
   }
 
   return {
@@ -194,6 +214,10 @@ describe('resolvePersistentSession', () => {
       type: 'partition',
       partition: 'persist:',
     })).toThrow(/include a name/)
+    expect(() => resolvePersistentSession({
+      type: 'partition',
+      partition: 'persist:   ',
+    })).toThrow(/include a name/)
   })
 
   test('resolves only absolute paths', () => {
@@ -222,9 +246,14 @@ describe('PersistentViewController', () => {
   beforeEach(() => {
     electronMock.appReady = true
     electronMock.MockWebContentsView.instances.length = 0
-    electronMock.partitionSession.clearStorageData.mockClear()
-    electronMock.partitionSession.flushStorageData.mockClear()
+    electronMock.partitionSession.clearStorageData.mockReset()
+    electronMock.partitionSession.clearStorageData.mockResolvedValue(undefined)
+    electronMock.partitionSession.flushStorageData.mockReset()
+    electronMock.partitionSession.cookies.flushStore.mockReset()
+    electronMock.partitionSession.cookies.flushStore.mockResolvedValue(undefined)
     electronMock.runtime.loadURLHandler = () => null
+    electronMock.runtime.setBoundsError = null
+    electronMock.runtime.focusError = null
   })
 
   test('opens a secure view and attaches it to the parent', async () => {
@@ -460,12 +489,82 @@ describe('PersistentViewController', () => {
     expect(controller.reload()).toBe(true)
     await controller.clearStorageData({ origin: 'https://example.test' })
     controller.flushStorageData()
+    await controller.flushPersistentData()
     expect(electronMock.partitionSession.clearStorageData).toHaveBeenCalledWith({
       origin: 'https://example.test',
     })
     expect(
       electronMock.partitionSession.flushStorageData,
+    ).toHaveBeenCalledTimes(2)
+    expect(
+      electronMock.partitionSession.cookies.flushStore,
     ).toHaveBeenCalledOnce()
+  })
+
+  test('aggregates DOM storage and cookie flush failures', async () => {
+    const domStorageError = new Error('DOM storage flush failed')
+    const cookieError = new Error('cookie flush failed')
+    electronMock.partitionSession.flushStorageData.mockImplementation(() => {
+      throw domStorageError
+    })
+    electronMock.partitionSession.cookies.flushStore.mockRejectedValue(
+      cookieError,
+    )
+    const controller = new PersistentViewController({
+      session: electronMock.partitionSession as never,
+    })
+
+    await expect(controller.flushPersistentData()).rejects.toEqual(
+      new AggregateError(
+        [domStorageError, cookieError],
+        'Persistent view data failed to flush',
+      ),
+    )
+    expect(
+      electronMock.partitionSession.cookies.flushStore,
+    ).toHaveBeenCalledOnce()
+  })
+
+  test('closes the view when initial bounds setup fails', async () => {
+    const boundsError = new Error('setBounds failed')
+    electronMock.runtime.setBoundsError = boundsError
+    const controller = new PersistentViewController({
+      session: electronMock.partitionSession as never,
+    })
+    const parent = electronMock.createParentWindow()
+
+    await expect(controller.open({
+      parentWindow: parent as never,
+      url: 'https://example.test/',
+      bounds: { x: 0, y: 0, width: 400, height: 300 },
+    })).rejects.toBe(boundsError)
+
+    const view = electronMock.MockWebContentsView.instances[0]
+    expect(parent.contentView.removeChildView).toHaveBeenCalledWith(view)
+    expect(view.webContents.close).toHaveBeenCalledOnce()
+    expect(controller.webContents).toBeNull()
+    expect(controller.state).toBe('idle')
+  })
+
+  test('closes the view when focusing after load fails', async () => {
+    const focusError = new Error('focus failed')
+    electronMock.runtime.focusError = focusError
+    const controller = new PersistentViewController({
+      session: electronMock.partitionSession as never,
+    })
+    const parent = electronMock.createParentWindow()
+
+    await expect(controller.open({
+      parentWindow: parent as never,
+      url: 'https://example.test/',
+      bounds: { x: 0, y: 0, width: 400, height: 300 },
+    })).rejects.toBe(focusError)
+
+    const view = electronMock.MockWebContentsView.instances[0]
+    expect(parent.contentView.removeChildView).toHaveBeenCalledWith(view)
+    expect(view.webContents.close).toHaveBeenCalledOnce()
+    expect(controller.webContents).toBeNull()
+    expect(controller.state).toBe('idle')
   })
 
   test('aborts a pending open and closes the failed view', async () => {
@@ -613,6 +712,116 @@ describe('PersistentViewController', () => {
     ])
     expect(consoleError).toHaveBeenCalled()
     consoleError.mockRestore()
+  })
+
+  test('reports closed when a visible-state listener closes the view', async () => {
+    const controller = new PersistentViewController({
+      session: electronMock.partitionSession as never,
+    })
+    const parent = electronMock.createParentWindow()
+    let closing: Promise<void> | null = null
+    controller.subscribe(state => {
+      if (state === 'visible') {
+        closing = controller.close()
+      }
+    })
+
+    await expect(controller.open({
+      parentWindow: parent as never,
+      url: 'https://example.test/',
+      bounds: { x: 0, y: 0, width: 400, height: 300 },
+    })).resolves.toEqual({ status: 'closed' })
+    await closing
+
+    const view = electronMock.MockWebContentsView.instances[0]
+    expect(view.webContents.focus).not.toHaveBeenCalled()
+    expect(view.webContents.close).toHaveBeenCalledOnce()
+    expect(controller.state).toBe('idle')
+  })
+
+  test('does not reopen from a closing-state listener', async () => {
+    const controller = new PersistentViewController({
+      session: electronMock.partitionSession as never,
+    })
+    const parent = electronMock.createParentWindow()
+    const openOptions = {
+      parentWindow: parent as never,
+      url: 'https://example.test/',
+      bounds: { x: 0, y: 0, width: 400, height: 300 },
+    }
+    let reentrantOpen: ReturnType<typeof controller.open> | null = null
+    controller.subscribe(state => {
+      if (state === 'closing') {
+        reentrantOpen = controller.open({
+          ...openOptions,
+          url: 'https://example.test/reentrant',
+        })
+      }
+    })
+
+    await controller.open(openOptions)
+    await controller.close()
+
+    await expect(reentrantOpen).resolves.toEqual({ status: 'closed' })
+    expect(electronMock.MockWebContentsView.instances).toHaveLength(1)
+    expect(controller.state).toBe('idle')
+  })
+
+  test('does not start a nested open from a state listener', async () => {
+    const controller = new PersistentViewController({
+      session: electronMock.partitionSession as never,
+    })
+    const parent = electronMock.createParentWindow()
+    let reentrantOpen: ReturnType<typeof controller.open> | null = null
+    controller.subscribe(state => {
+      if (state === 'opening') {
+        reentrantOpen = controller.open({
+          parentWindow: parent as never,
+          url: 'https://example.test/reentrant',
+          bounds: { x: 0, y: 0, width: 400, height: 300 },
+        })
+      }
+    })
+
+    await expect(controller.open({
+      parentWindow: parent as never,
+      url: 'https://example.test/original',
+      bounds: { x: 0, y: 0, width: 400, height: 300 },
+    })).resolves.toEqual({ status: 'opened' })
+    await expect(reentrantOpen).resolves.toEqual({ status: 'closed' })
+
+    const view = electronMock.MockWebContentsView.instances[0]
+    expect(view.webContents.loadedUrls).toEqual([
+      'https://example.test/original',
+    ])
+    expect(controller.state).toBe('visible')
+  })
+
+  test('does not reopen from a synchronous cleanup hook', async () => {
+    const parent = electronMock.createParentWindow()
+    const openOptions = {
+      parentWindow: parent as never,
+      url: 'https://example.test/',
+      bounds: { x: 0, y: 0, width: 400, height: 300 },
+    }
+    let reentrantOpen: Promise<{ status: string }> | null = null
+    let controller: PersistentViewController
+    controller = new PersistentViewController({
+      session: electronMock.partitionSession as never,
+      configureWebContents: () => () => {
+        reentrantOpen = controller.open({
+          ...openOptions,
+          url: 'https://example.test/reentrant',
+        })
+      },
+    })
+
+    await controller.open(openOptions)
+    await controller.close()
+
+    await expect(reentrantOpen).resolves.toEqual({ status: 'closed' })
+    expect(electronMock.MockWebContentsView.instances).toHaveLength(1)
+    expect(controller.state).toBe('idle')
   })
 
   test('closes idempotently and can create a fresh view later', async () => {

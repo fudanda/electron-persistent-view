@@ -8,7 +8,7 @@ not include authentication, renderer components, or navigation policy.
 
 ## Requirements
 
-- Electron 40 or newer
+- Electron 40.x (the validated peer range is `>=40 <41`)
 - Call the API after `app.whenReady()`
 
 ## Install
@@ -122,8 +122,11 @@ type PersistentSessionConfig =
     }
 ```
 
-Partitions must start with `persist:` and include a name. Profile paths must be
-absolute.
+Partitions must start with `persist:` and include a non-whitespace name.
+Profile paths must be absolute. Electron applies `cache` only when it creates a
+Session for that partition or path for the first time in the process. Resolve a
+shared Session once, early, and reuse it instead of resolving the same storage
+key with conflicting options.
 
 ### `resolvePersistentSession(input)`
 
@@ -183,6 +186,7 @@ reload(): boolean
 close(): Promise<void>
 clearStorageData(options?: ClearStorageDataOptions): Promise<void>
 flushStorageData(): void
+flushPersistentData(): Promise<void>
 subscribe(listener: (state: PersistentViewState) => void): () => void
 ```
 
@@ -193,6 +197,8 @@ subscribe(listener: (state: PersistentViewState) => void): () => void
 - A newer `open()` resolves the replaced call with `status: 'superseded'`.
   `close()`, parent closure, or external WebContents destruction resolves a
   pending call with `status: 'closed'`.
+- `PersistentViewOpenStatus` exports the three status values for hosts that
+  avoid comparing external discriminants with duplicated string literals.
 - Aborting `signal` rejects with an `AbortError`. A positive `timeoutMs` rejects
   with a `TimeoutError`. Both failure paths close the failed view and return the
   controller to `idle`.
@@ -203,12 +209,15 @@ subscribe(listener: (state: PersistentViewState) => void): () => void
   Session data. It is idempotent, and a later `open()` creates a fresh view.
 - Boolean methods return `false` when there is no live view or the supplied
   bounds are invalid.
-- `flushStorageData()` asks Chromium to write in-memory Session data to disk.
-  Use it after critical storage updates or before an intentional application
-  shutdown. It does not close the view.
+- `flushStorageData()` is Electron's synchronous DOM storage flush. It does not
+  flush cookies.
+- `flushPersistentData()` flushes DOM storage and awaits
+  `session.cookies.flushStore()`. Use it after critical storage updates or
+  before an intentional application shutdown. It does not close the view.
 - `subscribe()` observes future state changes and returns an idempotent
   unsubscribe function. Listener failures are logged and cannot interrupt the
-  controller lifecycle.
+  controller lifecycle. An `open()` attempted synchronously while setup,
+  cleanup, or a state listener is running resolves with `status: 'closed'`.
 
 ### Readonly properties
 

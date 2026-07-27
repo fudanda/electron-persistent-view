@@ -32,9 +32,10 @@ export function resolvePersistentSession(
     : undefined
 
   if (input.type === 'partition') {
+    const partitionName = input.partition.slice('persist:'.length)
     if (
       !input.partition.startsWith('persist:')
-      || input.partition.length === 'persist:'.length
+      || partitionName.trim().length === 0
     ) {
       throw new Error(
         'Persistent session partition must start with "persist:" and include a name',
