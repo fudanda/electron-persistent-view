@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.0 - 2026-07-27
+
+### Added
+
+- Added `unresponsive` and `crashed` lifecycle states for renderer health
+  events, including visibility-intent restoration after recovery.
+
+### Fixed
+
+- Closed the managed view when its renderer process exits instead of leaving
+  an unusable view attached.
+
 ## 0.4.1 - 2026-07-27
 
 ### Fixed

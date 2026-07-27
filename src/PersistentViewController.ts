@@ -1,7 +1,9 @@
 import {
   type BaseWindow,
   type ClearStorageDataOptions,
+  type Event as ElectronEvent,
   type Rectangle,
+  type RenderProcessGoneDetails,
   type Session,
   type WebContents,
   type WebPreferences,
@@ -50,6 +52,12 @@ interface ManagedView {
   configureCleanup: PersistentViewCleanup | null
   handleParentClosed: () => void
   handleWebContentsDestroyed: () => void
+  handleWebContentsUnresponsive: () => void
+  handleWebContentsResponsive: () => void
+  handleRenderProcessGone: (
+    event: ElectronEvent,
+    details: RenderProcessGoneDetails,
+  ) => void
 }
 
 type OpenOutcome =
@@ -87,6 +95,7 @@ export class PersistentViewController {
   private pendingOpen: PendingOpen | null = null
   private desiredVisible = false
   private focusWhenVisible = false
+  private isUnresponsive = false
   private currentState: PersistentViewState = 'idle'
   private operationId = 0
   private isDisposing = false
@@ -182,7 +191,7 @@ export class PersistentViewController {
     try {
       view.setBounds(bounds)
       view.setVisible(false)
-      this.setState('opening')
+      this.setOperationalState('opening')
 
       let loadPromise: Promise<OpenOutcome>
       try {
@@ -233,12 +242,12 @@ export class PersistentViewController {
 
       if (!this.desiredVisible) {
         view.setVisible(false)
-        this.setState('hidden')
+        this.setOperationalState('hidden')
         return this.getCompletedOpenResult(operationId, managedView)
       }
 
       view.setVisible(true)
-      this.setState('visible')
+      this.setOperationalState('visible')
       const completedResult = this.getCompletedOpenResult(
         operationId,
         managedView,
@@ -308,7 +317,7 @@ export class PersistentViewController {
         view.setVisible(false)
         this.desiredVisible = true
         this.focusWhenVisible = shouldFocus
-        this.setState('opening')
+        this.setOperationalState('opening')
         return true
       }
 
@@ -318,7 +327,7 @@ export class PersistentViewController {
       }
       this.desiredVisible = true
       this.focusWhenVisible = false
-      this.setState('visible')
+      this.setOperationalState('visible')
       return true
     } catch (error) {
       return this.failControlOperation('show view', error)
@@ -334,7 +343,7 @@ export class PersistentViewController {
       view.setVisible(false)
       this.desiredVisible = false
       this.focusWhenVisible = false
-      this.setState('hidden')
+      this.setOperationalState('hidden')
       return true
     } catch (error) {
       return this.failControlOperation('hide view', error)
@@ -394,6 +403,7 @@ export class PersistentViewController {
     })
     this.desiredVisible = false
     this.focusWhenVisible = false
+    this.isUnresponsive = false
     const managedView = this.managedView
 
     if (!managedView) {
@@ -476,6 +486,9 @@ export class PersistentViewController {
     let attached = false
     let parentListenerAttached = false
     let destroyedListenerAttached = false
+    let unresponsiveListenerAttached = false
+    let responsiveListenerAttached = false
+    let renderProcessGoneListenerAttached = false
     let managedView: ManagedView | null = null
     const wasDisposing = this.isDisposing
     this.isDisposing = true
@@ -508,6 +521,7 @@ export class PersistentViewController {
         })
         this.desiredVisible = false
         this.focusWhenVisible = false
+        this.isUnresponsive = false
         this.isDisposing = true
         let cleanupError: unknown | null = null
         try {
@@ -524,6 +538,59 @@ export class PersistentViewController {
           )
         }
       }
+      const handleWebContentsUnresponsive = (): void => {
+        if (
+          !managedView
+          || this.managedView !== managedView
+          || this.isDisposing
+        ) {
+          return
+        }
+        this.isUnresponsive = true
+        this.setState('unresponsive')
+      }
+      const handleWebContentsResponsive = (): void => {
+        if (
+          !managedView
+          || this.managedView !== managedView
+          || this.isDisposing
+          || !this.isUnresponsive
+        ) {
+          return
+        }
+        this.isUnresponsive = false
+        this.setState(
+          this.pendingOpen !== null
+            ? 'opening'
+            : this.desiredVisible
+              ? 'visible'
+              : 'hidden',
+        )
+      }
+      const handleRenderProcessGone = (
+        _event: ElectronEvent,
+        details: RenderProcessGoneDetails,
+      ): void => {
+        if (
+          !managedView
+          || this.managedView !== managedView
+          || this.isDisposing
+        ) {
+          return
+        }
+        console.warn(
+          '[electron-persistent-view] renderer process gone',
+          details,
+        )
+        this.isUnresponsive = false
+        this.setState('crashed')
+        void this.close().catch(error => {
+          console.error(
+            '[electron-persistent-view] failed to close after renderer process exited',
+            error,
+          )
+        })
+      }
 
       managedView = {
         view,
@@ -531,10 +598,19 @@ export class PersistentViewController {
         configureCleanup,
         handleParentClosed,
         handleWebContentsDestroyed,
+        handleWebContentsUnresponsive,
+        handleWebContentsResponsive,
+        handleRenderProcessGone,
       }
 
       view.webContents.once('destroyed', handleWebContentsDestroyed)
       destroyedListenerAttached = true
+      view.webContents.on('unresponsive', handleWebContentsUnresponsive)
+      unresponsiveListenerAttached = true
+      view.webContents.on('responsive', handleWebContentsResponsive)
+      responsiveListenerAttached = true
+      view.webContents.on('render-process-gone', handleRenderProcessGone)
+      renderProcessGoneListenerAttached = true
       parentWindow.contentView.addChildView(view)
       attached = true
       parentWindow.once('closed', handleParentClosed)
@@ -559,6 +635,48 @@ export class PersistentViewController {
           view.webContents.removeListener(
             'destroyed',
             managedView.handleWebContentsDestroyed,
+          )
+        } catch (caughtError) {
+          rollbackErrors.push(caughtError)
+        }
+      }
+      if (
+        unresponsiveListenerAttached
+        && managedView
+        && !view.webContents.isDestroyed()
+      ) {
+        try {
+          view.webContents.removeListener(
+            'unresponsive',
+            managedView.handleWebContentsUnresponsive,
+          )
+        } catch (caughtError) {
+          rollbackErrors.push(caughtError)
+        }
+      }
+      if (
+        responsiveListenerAttached
+        && managedView
+        && !view.webContents.isDestroyed()
+      ) {
+        try {
+          view.webContents.removeListener(
+            'responsive',
+            managedView.handleWebContentsResponsive,
+          )
+        } catch (caughtError) {
+          rollbackErrors.push(caughtError)
+        }
+      }
+      if (
+        renderProcessGoneListenerAttached
+        && managedView
+        && !view.webContents.isDestroyed()
+      ) {
+        try {
+          view.webContents.removeListener(
+            'render-process-gone',
+            managedView.handleRenderProcessGone,
           )
         } catch (caughtError) {
           rollbackErrors.push(caughtError)
@@ -610,6 +728,9 @@ export class PersistentViewController {
       configureCleanup,
       handleParentClosed,
       handleWebContentsDestroyed,
+      handleWebContentsUnresponsive,
+      handleWebContentsResponsive,
+      handleRenderProcessGone,
     } = managedView
 
     try {
@@ -622,6 +743,30 @@ export class PersistentViewController {
         view.webContents.removeListener(
           'destroyed',
           handleWebContentsDestroyed,
+        )
+      } catch (error) {
+        cleanupErrors.push(error)
+      }
+      try {
+        view.webContents.removeListener(
+          'unresponsive',
+          handleWebContentsUnresponsive,
+        )
+      } catch (error) {
+        cleanupErrors.push(error)
+      }
+      try {
+        view.webContents.removeListener(
+          'responsive',
+          handleWebContentsResponsive,
+        )
+      } catch (error) {
+        cleanupErrors.push(error)
+      }
+      try {
+        view.webContents.removeListener(
+          'render-process-gone',
+          handleRenderProcessGone,
         )
       } catch (error) {
         cleanupErrors.push(error)
@@ -709,6 +854,12 @@ export class PersistentViewController {
       return { status: PersistentViewOpenStatus.Superseded }
     }
     return { status: PersistentViewOpenStatus.Closed }
+  }
+
+  private setOperationalState(
+    state: 'opening' | 'visible' | 'hidden',
+  ): void {
+    this.setState(this.isUnresponsive ? 'unresponsive' : state)
   }
 
   private setState(state: PersistentViewState): void {

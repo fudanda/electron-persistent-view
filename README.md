@@ -220,13 +220,24 @@ subscribe(listener: (state: PersistentViewState) => void): () => void
   unsubscribe function. Listener failures are logged and cannot interrupt the
   controller lifecycle. An `open()` attempted synchronously while setup,
   cleanup, or a state listener is running resolves with `status: 'closed'`.
+- An unresponsive renderer changes state to `unresponsive`; the `responsive`
+  event restores the latest `opening`, `visible`, or `hidden` intent. A
+  `render-process-gone` event reports `crashed`, closes the unusable view, and
+  returns the controller to `idle`.
 
 ### Readonly properties
 
 ```ts
 readonly session: Session
 readonly webContents: WebContents | null
-readonly state: 'idle' | 'opening' | 'visible' | 'hidden' | 'closing'
+readonly state:
+  | 'idle'
+  | 'opening'
+  | 'visible'
+  | 'hidden'
+  | 'unresponsive'
+  | 'crashed'
+  | 'closing'
 ```
 
 The controller supports one parent window at a time. `close()` is idempotent,

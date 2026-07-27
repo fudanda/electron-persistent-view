@@ -58,6 +58,12 @@ const electronMock = vi.hoisted(() => {
       this.destroyed = true
       this.emit('destroyed')
     })
+    on = vi.fn((event: string, listener: Listener) => {
+      const listeners = this.listeners.get(event) ?? new Set<Listener>()
+      listeners.add(listener)
+      this.listeners.set(event, listeners)
+      return this
+    })
     once = vi.fn((event: string, listener: Listener) => {
       const wrapped: Listener = (...args) => {
         this.removeListener(event, wrapped)
@@ -785,6 +791,74 @@ describe('PersistentViewController', () => {
     ])
     expect(consoleError).toHaveBeenCalled()
     consoleError.mockRestore()
+  })
+
+  test('reports unresponsive state and restores the latest visibility intent', async () => {
+    const states: string[] = []
+    const controller = new PersistentViewController({
+      session: electronMock.partitionSession as never,
+    })
+    const parent = electronMock.createParentWindow()
+    await controller.open({
+      parentWindow: parent as never,
+      url: 'https://example.test/',
+      bounds: { x: 0, y: 0, width: 400, height: 300 },
+    })
+    controller.subscribe(state => {
+      states.push(state)
+    })
+    const view = electronMock.MockWebContentsView.instances[0]
+
+    view.webContents.emit('unresponsive')
+    expect(controller.state).toBe('unresponsive')
+    expect(controller.hide()).toBe(true)
+    expect(controller.state).toBe('unresponsive')
+
+    view.webContents.emit('responsive')
+    expect(controller.state).toBe('hidden')
+    expect(states).toEqual(['unresponsive', 'hidden'])
+  })
+
+  test('reports a renderer crash and closes a pending view', async () => {
+    const consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const load = createDeferred()
+    electronMock.runtime.loadURLHandler = () => load.promise
+    const states: string[] = []
+    const controller = new PersistentViewController({
+      session: electronMock.partitionSession as never,
+    })
+    const parent = electronMock.createParentWindow()
+    controller.subscribe(state => {
+      states.push(state)
+    })
+
+    try {
+      const opening = controller.open({
+        parentWindow: parent as never,
+        url: 'https://example.test/',
+        bounds: { x: 0, y: 0, width: 400, height: 300 },
+      })
+      const view = electronMock.MockWebContentsView.instances[0]
+      view.webContents.emit(
+        'render-process-gone',
+        {},
+        { reason: 'crashed', exitCode: 1 },
+      )
+
+      await expect(opening).resolves.toEqual({ status: 'closed' })
+      expect(states).toEqual(['opening', 'crashed', 'closing', 'idle'])
+      expect(parent.contentView.removeChildView).toHaveBeenCalledWith(view)
+      expect(view.webContents.close).toHaveBeenCalledOnce()
+      expect(controller.webContents).toBeNull()
+      expect(controller.state).toBe('idle')
+      expect(consoleWarn).toHaveBeenCalledWith(
+        '[electron-persistent-view] renderer process gone',
+        { reason: 'crashed', exitCode: 1 },
+      )
+    } finally {
+      consoleWarn.mockRestore()
+      load.resolve(undefined)
+    }
   })
 
   test('reports closed when a visible-state listener closes the view', async () => {

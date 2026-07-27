@@ -90,6 +90,8 @@ export type PersistentViewState =
   | 'opening'
   | 'visible'
   | 'hidden'
+  | 'unresponsive'
+  | 'crashed'
   | 'closing'
 
 export type PersistentViewStateListener = (
