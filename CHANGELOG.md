@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.1 - 2026-07-27
+
+### Fixed
+
+- Made `setBounds()`, `show()`, `hide()`, and `reload()` fail closed when
+  Electron throws instead of leaving stale lifecycle state behind.
+
 ## 0.4.0 - 2026-07-27
 
 ### Added

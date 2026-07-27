@@ -207,8 +207,10 @@ subscribe(listener: (state: PersistentViewState) => void): () => void
   or focusing it.
 - `close()` detaches and closes WebContents without deleting persistent
   Session data. It is idempotent, and a later `open()` creates a fresh view.
-- Boolean methods return `false` when there is no live view or the supplied
-  bounds are invalid.
+- Boolean methods return `false` when there is no live view, the supplied
+  bounds are invalid, or Electron rejects the requested control operation.
+  Control-operation failures close the unreliable view and return the
+  controller to `idle`.
 - `flushStorageData()` is Electron's synchronous DOM storage flush. It does not
   flush cookies.
 - `flushPersistentData()` flushes DOM storage and awaits

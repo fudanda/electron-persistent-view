@@ -1,7 +1,7 @@
 {
   "name": "@fudanda/electron-persistent-view",
   "type": "module",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "A secure persistent WebContentsView controller for Electron.",
   "author": "fudanda <314553951@qq.com>",
   "license": "MIT",

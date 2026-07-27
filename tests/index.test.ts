@@ -12,10 +12,14 @@ const electronMock = vi.hoisted(() => {
     ) => Promise<void> | null
     setBoundsError: Error | null
     focusError: Error | null
+    reloadError: Error | null
+    setVisibleError: Error | null
   } = {
     loadURLHandler: () => null,
     setBoundsError: null,
     focusError: null,
+    reloadError: null,
+    setVisibleError: null,
   }
 
   class MockWebContents {
@@ -38,6 +42,11 @@ const electronMock = vi.hoisted(() => {
       this.focused = true
     })
     reload = vi.fn(() => {
+      if (runtime.reloadError) {
+        const error = runtime.reloadError
+        runtime.reloadError = null
+        throw error
+      }
       this.reloaded = true
     })
     setWindowOpenHandler = vi.fn((handler: (details: { url: string }) => unknown) => {
@@ -98,6 +107,11 @@ const electronMock = vi.hoisted(() => {
       this.bounds = bounds
     })
     setVisible = vi.fn((visible: boolean) => {
+      if (runtime.setVisibleError) {
+        const error = runtime.setVisibleError
+        runtime.setVisibleError = null
+        throw error
+      }
       this.visible = visible
     })
     setBackgroundColor = vi.fn((color: string) => {
@@ -254,6 +268,8 @@ describe('PersistentViewController', () => {
     electronMock.runtime.loadURLHandler = () => null
     electronMock.runtime.setBoundsError = null
     electronMock.runtime.focusError = null
+    electronMock.runtime.reloadError = null
+    electronMock.runtime.setVisibleError = null
   })
 
   test('opens a secure view and attaches it to the parent', async () => {
@@ -499,6 +515,63 @@ describe('PersistentViewController', () => {
     expect(
       electronMock.partitionSession.cookies.flushStore,
     ).toHaveBeenCalledOnce()
+  })
+
+  test('returns false and closes the view when a control operation fails', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const controller = new PersistentViewController({
+      session: electronMock.partitionSession as never,
+    })
+    const parent = electronMock.createParentWindow()
+    const open = async (url: string): Promise<void> => {
+      await controller.open({
+        parentWindow: parent as never,
+        url,
+        bounds: { x: 0, y: 0, width: 400, height: 300 },
+      })
+    }
+
+    try {
+      await open('https://example.test/set-bounds')
+      electronMock.runtime.setBoundsError = new Error('setBounds failed')
+      expect(controller.setBounds({
+        x: 0,
+        y: 0,
+        width: 800,
+        height: 600,
+      })).toBe(false)
+      expect(controller.state).toBe('idle')
+      expect(controller.webContents).toBeNull()
+
+      await open('https://example.test/show')
+      expect(controller.hide()).toBe(true)
+      electronMock.runtime.focusError = new Error('focus failed')
+      expect(controller.show({ focus: true })).toBe(false)
+      expect(controller.state).toBe('idle')
+      expect(controller.webContents).toBeNull()
+
+      await open('https://example.test/hide')
+      electronMock.runtime.setVisibleError = new Error('setVisible failed')
+      expect(controller.hide()).toBe(false)
+      expect(controller.state).toBe('idle')
+      expect(controller.webContents).toBeNull()
+
+      await open('https://example.test/reload')
+      electronMock.runtime.reloadError = new Error('reload failed')
+      expect(controller.reload()).toBe(false)
+      expect(controller.state).toBe('idle')
+      expect(controller.webContents).toBeNull()
+
+      const views = electronMock.MockWebContentsView.instances
+      expect(views).toHaveLength(4)
+      for (const view of views) {
+        expect(parent.contentView.removeChildView).toHaveBeenCalledWith(view)
+        expect(view.webContents.close).toHaveBeenCalledOnce()
+      }
+      expect(consoleError).toHaveBeenCalledTimes(4)
+    } finally {
+      consoleError.mockRestore()
+    }
   })
 
   test('aggregates DOM storage and cookie flush failures', async () => {

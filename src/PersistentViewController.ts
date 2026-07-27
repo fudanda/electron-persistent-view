@@ -281,8 +281,12 @@ export class PersistentViewController {
     if (!normalized || !view || view.webContents.isDestroyed()) {
       return false
     }
-    view.setBounds(normalized)
-    return true
+    try {
+      view.setBounds(normalized)
+      return true
+    } catch (error) {
+      return this.failControlOperation('set bounds', error)
+    }
   }
 
   show(options: { focus?: boolean } = {}): boolean {
@@ -298,21 +302,27 @@ export class PersistentViewController {
       return false
     }
 
-    this.desiredVisible = true
-    this.focusWhenVisible = options.focus === true
-    if (this.pendingOpen !== null) {
-      view.setVisible(false)
-      this.setState('opening')
-      return true
-    }
+    const shouldFocus = options.focus === true
+    try {
+      if (this.pendingOpen !== null) {
+        view.setVisible(false)
+        this.desiredVisible = true
+        this.focusWhenVisible = shouldFocus
+        this.setState('opening')
+        return true
+      }
 
-    view.setVisible(true)
-    this.setState('visible')
-    if (this.focusWhenVisible) {
-      view.webContents.focus()
+      view.setVisible(true)
+      if (shouldFocus) {
+        view.webContents.focus()
+      }
+      this.desiredVisible = true
+      this.focusWhenVisible = false
+      this.setState('visible')
+      return true
+    } catch (error) {
+      return this.failControlOperation('show view', error)
     }
-    this.focusWhenVisible = false
-    return true
   }
 
   hide(): boolean {
@@ -320,19 +330,27 @@ export class PersistentViewController {
     const view = this.managedView?.view
     if (!view || view.webContents.isDestroyed()) return false
 
-    this.desiredVisible = false
-    this.focusWhenVisible = false
-    view.setVisible(false)
-    this.setState('hidden')
-    return true
+    try {
+      view.setVisible(false)
+      this.desiredVisible = false
+      this.focusWhenVisible = false
+      this.setState('hidden')
+      return true
+    } catch (error) {
+      return this.failControlOperation('hide view', error)
+    }
   }
 
   reload(): boolean {
     if (this.isDisposing) return false
     const webContents = this.webContents
     if (!webContents) return false
-    webContents.reload()
-    return true
+    try {
+      webContents.reload()
+      return true
+    } catch (error) {
+      return this.failControlOperation('reload view', error)
+    }
   }
 
   async clearStorageData(
@@ -657,6 +675,20 @@ export class PersistentViewController {
       )
     }
     throw error
+  }
+
+  private failControlOperation(operation: string, error: unknown): false {
+    console.error(
+      `[electron-persistent-view] failed to ${operation}; closing view`,
+      error,
+    )
+    void this.close().catch(cleanupError => {
+      console.error(
+        `[electron-persistent-view] failed to close after ${operation} failed`,
+        cleanupError,
+      )
+    })
+    return false
   }
 
   private getCompletedOpenResult(
